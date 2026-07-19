@@ -1,0 +1,423 @@
+Option Explicit
+Private wsResults As Worksheet
+
+Private Sub UserForm_Initialize()
+    With Me.GenderField
+        .Clear
+        .AddItem "Female"
+        .AddItem "Male"
+        .ListIndex = 0   ' selects "Female" by default
+    End With
+End Sub
+
+Private Sub CancelButton_Click()
+   Call ResetCalc
+End Sub
+
+Private Sub SubmitButton_Click()
+    
+    Dim ctrl As Control
+    Dim age As Integer
+    Dim term As Integer
+    Dim rate As Double
+    Dim benefit As Double
+    Dim gender As String
+    Dim epv As Double
+    Dim premium As Double
+    Dim numSim As Long
+
+
+    If Not ValidateUserInput() Then
+        Exit Sub
+    End If
+
+    age = CInt(AgeField.Value)
+    term = CInt(TermField.Value)
+    rate = CDbl(rateField.Value)
+    gender = GenderField.Value
+    numSim = CInt(numOfSims.Value)
+    benefit = CDbl(BenefitField.Value)
+    
+    Call ResetResultsWS
+    
+    'Run the acturial calculations
+    epv = CalcDeathBenefit(age, term, rate, gender, benefit)
+    premium = CalcNetLevelPremium(age, term, rate, gender, benefit)
+    
+    'Call the Monte Carlo Simulation
+    Call MCSimulation(age, term, rate, gender, benefit, numSim)
+    
+    Call OutputResults(epv, premium, age, term, rate, benefit, gender)
+  
+    'called after outputting results since this just creates a chart - more output
+    Call DrawTermSensitivityChart(wsResults, age, rate, gender, benefit, term)
+    
+    MsgBox "Calculation completed! Please view outputs in result worksheet.", vbInformation
+    
+    'Reset
+    Call ResetCalc
+  
+    
+End Sub
+Private Function ValidateUserInput() As Boolean
+    Dim ctrl As Control
+    
+    ValidateUserInput = False
+
+    'Check for empty fields
+    For Each ctrl In Me.Controls
+        If TypeName(ctrl) = "TextBox" Or TypeName(ctrl) = "ComboBox" Then
+            ctrl.Value = Trim(ctrl.Value)
+            If ctrl.Value = "" Then
+                MsgBox "The " & ctrl.Name & " is required.", vbExclamation
+                Exit Function
+            End If
+        End If
+    Next ctrl
+
+    ' Numeric-type check
+    If Not IsNumeric(AgeField.Value) Or _
+       Not IsNumeric(TermField.Value) Or _
+       Not IsNumeric(rateField.Value) Or _
+       Not IsNumeric(numOfSims.Value) Or _
+       Not IsNumeric(BenefitField.Value) Then
+
+        MsgBox "Please enter valid numbers for age, term, rate, benefit, and number of simulations.", vbExclamation
+        Exit Function
+    End If
+
+    'Age-range check
+    If CInt(AgeField.Value) < 27 Or CInt(AgeField.Value) > 99 Then
+        MsgBox "Please enter an age between 27 and 99.", vbExclamation
+        Exit Function
+    End If
+    
+    If CInt(numOfSims.Value) <= 0 Then
+        MsgBox "Please enter a number above 0 for the number of simulations"
+        Exit Function
+    End If
+        
+
+    'all checks passed
+    ValidateUserInput = True
+End Function
+
+
+Private Sub ResetResultsWS()
+
+    Dim sheetExists As Boolean
+    Dim ws As Worksheet
+    Dim chartObj As ChartObject
+
+    sheetExists = False
+    For Each ws In ThisWorkbook.Worksheets
+        If ws.Name = "Results" Then
+            sheetExists = True
+            Set wsResults = ws       ' ? module-level
+            Exit For
+        End If
+    Next ws
+
+    If Not sheetExists Then
+        Set wsResults = ThisWorkbook.Worksheets.Add( _
+                           After:=ThisWorkbook.Sheets(ThisWorkbook.Sheets.Count))
+        wsResults.Name = "Results"
+    End If
+    
+    wsResults.Cells.Clear
+    
+    For Each chartObj In wsResults.ChartObjects
+        chartObj.Delete
+    Next chartObj
+    
+
+End Sub
+
+
+Function GetQx(age As Integer, gender As String) As Double
+    Dim ws As Worksheet
+    Dim lastRow As Long
+    Dim i As Long
+    Dim j As Long
+    
+    Set ws = ThisWorkbook.Worksheets("MortalityTable")
+    
+    gender = LCase(gender) 'elimates user input error
+    If gender = "male" Then
+        j = 2
+ 
+    Else
+        j = 3 'different qx values for each gender - stored in different columns
+    End If
+    
+         
+    lastRow = ws.Cells(ws.Rows.Count, 1).End(xlUp).Row
+    
+    For i = 2 To lastRow
+        If ws.Cells(i, 1).Value = age Then
+            GetQx = ws.Cells(i, j).Value 'column B for mortality rates for men; C for women
+            Exit Function
+        End If
+    Next i
+
+    
+    'default value if nothing is found - mainly for debugging
+    GetQx = 0
+
+
+    
+End Function
+
+Function CalcDeathBenefit(age As Integer, term As Integer, i As Double, gender As String, benefit As Double) As Double
+    Dim v As Double: v = 1 / (1 + i)
+    Dim k As Integer
+    Dim qx As Double
+    Dim px As Double
+    Dim pxAccum As Double: pxAccum = 1
+    Dim epv As Double: epv = 0
+
+    'for loop that loops the length of term
+    
+    For k = 1 To term
+        qx = GetQx(age + k - 1, gender)
+        epv = epv + (v ^ k) * pxAccum * qx * benefit
+        pxAccum = pxAccum * (1 - qx)
+    Next k
+
+    CalcDeathBenefit = epv
+    
+End Function
+
+Function CalcNetLevelPremium(age As Integer, term As Integer, i As Double, gender As String, benefit As Double) As Double
+    Dim epvBenefit As Double
+    Dim epvAnnuity As Double
+    Dim k As Integer
+    Dim v As Double: v = 1 / (1 + i)
+    Dim pxAccum As Double: pxAccum = 1
+
+    epvBenefit = CalcDeathBenefit(age, term, i, gender, benefit)
+    
+    ' Calculate annuity due
+    For k = 0 To term - 1
+        epvAnnuity = epvAnnuity + (v ^ k) * pxAccum
+        pxAccum = pxAccum * (1 - GetQx(age + k, gender))
+    Next k
+
+    CalcNetLevelPremium = epvBenefit / epvAnnuity
+End Function
+
+Sub MCSimulation(age As Integer, term As Integer, i As Double, gender As String, benefit As Double, numSim As Long)
+    
+    Dim v As Double: v = 1 / (1 + i)
+    Dim ws As Worksheet
+    Dim simResults() As Double
+    Dim s As Long
+    Dim k As Integer
+    Dim rand As Double
+    Dim qx As Double
+    Dim pxAccum As Double
+    Dim epvSim As Double
+    Dim numZero As Long
+    Dim numNonZero As Long
+    Dim epvAvg As Double
+    Dim epvSum As Double
+  
+    ReDim simResults(1 To numSim)
+        
+        For s = 1 To numSim
+            pxAccum = 1
+            epvSim = 0
+            For k = 1 To term
+                qx = GetQx(age + k - 1, gender)
+                rand = Rnd()
+                If rand <= qx Then
+                    epvSim = (v ^ k) * pxAccum * benefit
+                    Exit For
+                End If
+                pxAccum = pxAccum * (1 - qx)
+            Next k
+            simResults(s) = epvSim
+        Next s
+    
+        
+        ' Count zeros and non-zeros to show survival probability and calc average
+        epvSum = 0
+        numZero = 0
+        numNonZero = 0
+    
+        
+        For s = 1 To numSim
+            If simResults(s) = 0 Then
+                numZero = numZero + 1
+            Else
+                epvSum = epvSum + simResults(s)
+                numNonZero = numNonZero + 1
+            End If
+        Next s
+        
+        
+        If numNonZero = 0 Then
+            epvAvg = 0
+        Else
+            epvAvg = epvSum / numNonZero
+        End If
+    
+        ' Output summary statistics
+        Call OuputMonteCarlo(numSim, simResults, numZero, numNonZero, epvAvg)
+
+End Sub
+Private Sub OuputMonteCarlo(numSim, simResults, numZero, numNonZero, epvAvg)
+
+       Dim chartObj As ChartObject
+       Dim ws As Worksheet
+       Dim s As Long
+       
+       Set ws = Worksheets("Results")
+
+        With ws.Range("E2")
+        .Value = "Monte Carlo EPVs"
+        .Font.Bold = True
+    End With
+    
+    For s = 4 To (numSim + 3)
+        ws.Cells(s, 5).Value = simResults(s - 3)
+        ws.Cells(s, 5).NumberFormat = "$#,##0.00"
+    Next s
+    
+    With ws
+        .Range("G2").Value = "Monte Carlo Summary"
+        .Range("G2").Font.Bold = True
+        .Range("G4").Value = "Number of Simulations"
+        .Range("H4").Value = numSim
+        .Range("H4").NumberFormat = "#,##0"
+
+        .Range("G5").Value = "Survived Full Term"
+        .Range("H5").Value = numZero
+        .Range("I5").Value = Format(numZero / numSim, "0.00%")
+
+        .Range("G6").Value = "Died During Term"
+        .Range("H6").Value = numNonZero
+        .Range("I6").Value = Format(numNonZero / numSim, "0.00%")
+        
+        .Range("A6").Value = "Average of non-zero Monte Carlo EPV"
+        .Range("B6").Value = epvAvg
+        .Range("B6").NumberFormat = "$#,##0.00"
+    
+    End With
+    
+    ws.Columns.AutoFit
+    
+    'Creating survival probability chart
+    Set chartObj = ws.ChartObjects.Add(Left:=0, Width:=300, Top:=115, Height:=250)
+    With chartObj.Chart
+        .ChartType = xlPie
+        .SetSourceData Source:=ws.Range("G5:H6")
+        .HasTitle = True
+        .ChartTitle.Text = "Survival vs Death Outcomes"
+    End With
+    
+
+End Sub
+Private Sub OutputResults(epv, premium, age, term, rate, benefit, gender)
+     'Create headings for results ws
+     With wsResults.Range("A1")
+        .Value = "Actuarial Calculation Results"
+        .Font.Name = "Century Gothic"
+        .Font.Size = 16
+        .Font.Bold = True
+        .Font.Color = RGB(0, 102, 204)
+    End With
+
+    'Inputs and Outputs to results ws
+    With wsResults
+        .Range("A3").Value = "EPV of Death Benefit"
+        .Range("B3").Value = epv
+        .Range("B3").NumberFormat = "$#,##0.00"
+
+        .Range("A4").Value = "Net Level Premium"
+        .Range("B4").Value = premium
+        .Range("B4").NumberFormat = "$#,##0.00"
+        
+        .Range("K2").Value = "Input"
+        .Range("K2").Font.Bold = True
+        
+        .Range("L2").Value = "Value"
+        .Range("L2").Font.Bold = True
+      
+        .Range("K3").Value = "Age"
+        .Range("L3").Value = age
+        
+        .Range("K4").Value = "Term (years)"
+        .Range("L4").Value = term
+        
+        .Range("K5").Value = "Interest Rate"
+        .Range("L5").Value = rate
+        .Range("L5").NumberFormat = "0.00%"
+        
+        .Range("K6").Value = "Death Benefit"
+        .Range("L6").Value = benefit
+        .Range("L6").NumberFormat = "$#,##0.00"
+        
+        .Range("K7").Value = "Gender"
+        .Range("L7").Value = gender
+        
+         wsResults.Columns.AutoFit
+    End With
+End Sub
+
+
+Private Sub DrawTermSensitivityChart(ws As Worksheet, age As Integer, _
+    rate As Double, gender As String, benefit As Double, maxTerm As Integer)
+
+    Dim t As Integer
+    Dim terms() As Double
+    Dim premiums() As Double
+    Dim chartObj As ChartObject
+    Dim s As Series
+
+    'Building arrays to store values of Net Level Premiums based on the term of the policy
+    ReDim terms(1 To maxTerm)
+    ReDim premiums(1 To maxTerm)
+    For t = 1 To maxTerm
+        terms(t) = t
+        premiums(t) = CalcNetLevelPremium(age, t, rate, gender, benefit)
+    Next t
+
+    'Creating a chart to display the effect term has on net level premiums
+    Set chartObj = ws.ChartObjects.Add(Left:=500, Width:=700, Top:=115, Height:=250)
+    With chartObj.Chart
+        .ChartType = xlLineMarkers
+        Set s = .SeriesCollection.NewSeries
+        s.Name = "=""Net Premium vs Term"""
+        s.XValues = terms
+        s.Values = premiums
+        'Chart formatting
+        .HasTitle = True
+        .ChartTitle.Text = "Net Premium vs. Policy Term"
+        With .Axes(xlCategory)
+            .HasTitle = True
+            .AxisTitle.Text = "Term (years)"
+        End With
+        With .Axes(xlValue)
+            .HasTitle = True
+            .AxisTitle.Text = "Net Level Premium"
+        End With
+        .HasLegend = False
+    End With
+    
+    ws.Columns.AutoFit
+End Sub
+
+Private Sub ResetCalc()
+    Dim ctrl As Control
+    
+    Actuarial_Calc.Hide
+    
+    
+    For Each ctrl In Actuarial_Calc.Controls
+        If TypeName(ctrl) = "TextBox" Or TypeName(ctrl) = "Combobox" Then
+            ctrl.Value = ""
+        End If
+    Next ctrl
+End Sub
+
